@@ -1,0 +1,152 @@
+vcl 4.0;
+
+import std;
+
+backend default {
+    .host = "${BACKEND_HOST}";
+    .port = "${BACKEND_PORT}";
+    .first_byte_timeout = 3600s;
+    .between_bytes_timeout = 300s;
+}
+
+acl purge {
+    "${ACL_PURGE_HOST}";
+}
+
+sub vcl_recv {
+    if (req.method == "PURGE") {
+        if (client.ip !~ purge) {
+            return (synth(405, "Method not allowed"));
+        }
+
+        if (req.http.x-invalidate-all) {
+            ban("obj.status != 0");
+            return (synth(200, "Purged"));
+        }
+
+        if (req.http.x-invalidate-tags) {
+            ban("obj.http.X-CACHE-TAGS ~ " + req.http.x-invalidate-tags);
+            return (synth(200, "Purged"));
+        }
+
+        return (purge);
+    }
+
+    if (req.method != "GET" &&
+        req.method != "HEAD" &&
+        req.method != "PUT" &&
+        req.method != "POST" &&
+        req.method != "TRACE" &&
+        req.method != "OPTIONS" &&
+        req.method != "DELETE" && 
+        req.method != "PATCH" ) {
+          /* Non-RFC2616 or CONNECT which is weird. */
+          return (pipe);
+    }
+
+    # Handle profile requests from Blackfire browser plugin
+    if (req.http.X-Blackfire-Query) {
+        return (pass);
+    }
+
+    # We only deal with GET and HEAD by default
+    if (req.method != "GET" && req.method != "HEAD") {
+        return (pass);
+    }
+
+    # normalize url in case of leading HTTP scheme and domain
+    set req.url = regsub(req.url, "^http[s]?://", "");
+
+    # if (req.http.Authorization || req.http.Cookie) {
+    #     /* Not cacheable by default */
+    #     return (pass);
+    # }
+
+    # Remove all marketing get parameters to minimize the cache objects
+    if (req.url ~ "(\?|&)(gclid|cx|ie|cof|siteurl|zanpid|origin|fbclid|mc_[a-z]+|utm_[a-z]+|_bta_[a-z]+)=") {
+        set req.url = regsuball(req.url, "(gclid|cx|ie|cof|siteurl|zanpid|origin|fbclid|mc_[a-z]+|utm_[a-z]+|_bta_[a-z]+)=[-_A-z0-9+()%.]+&?", "");
+        set req.url = regsub(req.url, "[?|&]+$", "");
+    }
+
+    return (hash);
+}
+
+sub vcl_hash {
+    # Cache AJAX replies seperately than non-AJAX
+    if (req.http.X-Requested-With) {
+        hash_data(req.http.X-Requested-With);
+    }
+
+    # To make sure http users don't see ssl warning
+    if (req.http.X-Forwarded-Proto) {
+        hash_data(req.http.X-Forwarded-Proto);
+    }
+
+
+    hash_data(req.url);
+
+    if (req.http.host) {
+        hash_data(req.http.host);       
+    } else {
+        hash_data(server.ip);
+    }
+
+    # Vary content for different customer groups etc
+    if (req.http.Cookie ~ "X-Cache-Vary=") {
+        hash_data(regsub(req.http.Cookie, "^.*?X-Cache-Vary=([a-zA-Z0-9_]+);*.*$", "\1"));
+    }
+
+    return (lookup);
+}
+
+sub vcl_backend_response {
+    # cache only successfully responses and 404s that are not marked as private
+    if (beresp.status != 200 &&
+            beresp.status != 404 &&
+            beresp.http.Cache-Control ~ "private") {
+        set beresp.uncacheable = true;
+        set beresp.ttl = 86400s;
+        return (deliver);
+    }
+
+    # validate if we need to cache it and prevent from setting cookie
+    if (beresp.ttl > 0s && (bereq.method == "GET" || bereq.method == "HEAD")) {
+        unset beresp.http.set-cookie;
+    }
+
+   # If page is not cacheable then bypass varnish for 2 minutes as Hit-For-Pass
+    if (beresp.ttl <= 0s ||
+        beresp.http.Surrogate-control ~ "no-store" ||
+        (!beresp.http.Surrogate-Control &&
+        beresp.http.Cache-Control ~ "no-cache|no-store") ||
+        beresp.http.Vary == "*") {
+         # Mark as Hit-For-Pass for the next 2 minutes
+         set beresp.ttl = 120s;
+         set beresp.uncacheable = true;
+    }
+
+    return (deliver);
+}
+
+sub vcl_deliver {
+    # Always include hit/miss information in response
+    if (resp.http.x-varnish ~ " ") {
+        set resp.http.X-Cache = "HIT";
+    } else {
+        set resp.http.X-Cache = "MISS";
+    }
+
+    if (resp.http.x-cache-debug == "1") {
+        set resp.http.X-Cache-Hits = obj.hits;
+    } else {
+        unset resp.http.x-cache-tags;
+    }
+
+
+    # Not letting browser to cache non-static files.
+    if (resp.http.Cache-Control !~ "private" && req.url !~ "^/(pub/)?(media|static)/") {
+        set resp.http.Pragma = "no-cache";
+        set resp.http.Expires = "-1";
+        set resp.http.Cache-Control = "no-store, no-cache, must-revalidate, max-age=0";
+    }
+}
