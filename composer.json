@@ -17,5 +17,26 @@
                 "Samjuk\\Varnish\\ServiceProvider"
             ]
         }
-    }
+    },
+    "license": "MIT",
+    "homepage": "https://github.com/SamJUK/aero-module-varnish",
+    "authors": [
+        {
+            "name": "Sam James",
+            "email": "sam@samdjames.uk",
+            "homepage": "https://www.samdjames.uk"
+        }
+    ],
+    "keywords": [
+        "aero-commerce",
+        "aerocommerce",
+        "ecommerce",
+        "varnish",
+        "full-page-cache",
+        "fpc",
+        "cache",
+        "php",
+        "experimental",
+        "open-source"
+    ]
 }
